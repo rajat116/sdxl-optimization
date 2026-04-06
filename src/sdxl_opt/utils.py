@@ -49,7 +49,7 @@ def get_gpu_info() -> GPUInfo:
     props = torch.cuda.get_device_properties(0)
     return GPUInfo(
         name=props.name,
-        total_memory_gb=props.total_mem / 1e9,
+        total_memory_gb=props.total_memory / 1e9,
         compute_capability=(props.major, props.minor),
     )
 
