@@ -7,7 +7,8 @@ peft>=0.9.0
 safetensors
 open-clip-torch
 torchmetrics[image]
-litserve>=0.2.0
+litserve==0.2.5
+gradio>=4.0.0
 pyyaml
 pandas
 matplotlib
