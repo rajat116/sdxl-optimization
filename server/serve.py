@@ -1,31 +1,32 @@
-#!/usr/bin/env python3
 """
 LitServe API server for optimized SDXL inference.
 
-Supports three deployment presets:
-  - speed:    Maximum throughput (~4 steps, full compression stack)
-  - balanced: Good quality/speed trade-off (~8 steps)
-  - quality:  Minimal quality loss (~50 steps, caching + compile only)
+Three deployment presets:
+  - speed:    LCM 4 steps — maximum throughput
+  - balanced: LCM 8 steps + TinyVAE — good quality, low memory
+  - quality:  DeepCache — minimal quality loss, moderate speedup
 
 Usage:
     python server/serve.py --preset balanced --port 8000
+
     curl -X POST http://localhost:8000/predict \
         -H "Content-Type: application/json" \
-        -d '{"prompt": "a photo of an astronaut riding a horse"}'
+        -d '{"prompt": "a photo of an astronaut riding a horse on mars"}'
 """
 
 import argparse
 import base64
+import gc
 import io
 import logging
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import litserve as ls
 import torch
+import litserve as ls
 
 from sdxl_opt.pipeline import CompressionConfig, load_pipeline, generate_images
 from sdxl_opt.utils import seed_everything, setup_logging
@@ -33,40 +34,38 @@ from sdxl_opt.utils import seed_everything, setup_logging
 logger = logging.getLogger("sdxl_opt")
 
 # ---------------------------------------------------------------------------
-# Deployment presets
+# Deployment presets (tuned from benchmark results on T4)
 # ---------------------------------------------------------------------------
-PRESETS: dict[str, CompressionConfig] = {
+PRESETS = {
     "speed": CompressionConfig(
-        name="preset_speed",
+        name="speed",
         dtype="fp16",
         use_lcm_lora=True,
-        use_torch_compile=True,
-        compile_mode="reduce-overhead",
-        use_tiny_vae=True,
-        use_deepcache=True,
-        deepcache_interval=3,
         num_inference_steps=4,
         guidance_scale=1.5,
     ),
     "balanced": CompressionConfig(
-        name="preset_balanced",
+        name="balanced",
         dtype="fp16",
         use_lcm_lora=True,
-        use_deepcache=True,
-        deepcache_interval=2,
+        use_tiny_vae=True,
         num_inference_steps=8,
         guidance_scale=1.5,
     ),
     "quality": CompressionConfig(
-        name="preset_quality",
+        name="quality",
         dtype="fp16",
         use_deepcache=True,
         deepcache_interval=2,
-        use_torch_compile=True,
-        compile_mode="reduce-overhead",
         num_inference_steps=50,
         guidance_scale=7.5,
     ),
+}
+
+PRESET_INFO = {
+    "speed": {"description": "Maximum throughput (~0.85s)", "steps": 4, "expected_speedup": "6.7×"},
+    "balanced": {"description": "Good quality + low memory (~1.0s)", "steps": 8, "expected_speedup": "5.5×"},
+    "quality": {"description": "Minimal quality loss (~3.4s)", "steps": 50, "expected_speedup": "1.7×"},
 }
 
 
@@ -83,11 +82,12 @@ class SDXLServingAPI(ls.LitAPI):
         logger.info(f"Loading SDXL with preset: {self.preset}")
         self.pipe = load_pipeline(self.config)
 
-        # Warm up (critical for torch.compile)
+        # Warm up
         logger.info("Running warm-up inference...")
         gen = seed_everything(0)
         generate_images(
-            self.pipe, self.config, ["warmup"], generator=gen, height=512, width=512
+            self.pipe, self.config, ["warmup"],
+            generator=gen, height=512, width=512,
         )
         torch.cuda.synchronize()
         logger.info("Server ready.")
@@ -104,26 +104,15 @@ class SDXLServingAPI(ls.LitAPI):
             "seed": request.get("seed", 42),
             "height": min(request.get("height", 1024), 1024),
             "width": min(request.get("width", 1024), 1024),
-            "num_steps": request.get("num_steps", self.config.num_inference_steps),
-            "guidance_scale": request.get("guidance_scale", self.config.guidance_scale),
         }
 
     def predict(self, inputs: dict) -> dict:
         """Run inference and return generated image."""
         gen = seed_everything(inputs["seed"])
 
-        # Override steps/guidance if provided
-        config = CompressionConfig(
-            **{
-                **vars(self.config),
-                "num_inference_steps": inputs["num_steps"],
-                "guidance_scale": inputs["guidance_scale"],
-            }
-        )
-
         t0 = time.perf_counter()
         images = generate_images(
-            self.pipe, config, [inputs["prompt"]],
+            self.pipe, self.config, [inputs["prompt"]],
             generator=gen,
             height=inputs["height"],
             width=inputs["width"],
@@ -142,6 +131,7 @@ class SDXLServingAPI(ls.LitAPI):
             "image_base64": b64,
             "latency_s": round(output["latency_s"], 3),
             "preset": self.preset,
+            "preset_info": PRESET_INFO[self.preset],
             "format": "png",
         }
 
@@ -155,7 +145,6 @@ def main():
         help="Compression preset to use",
     )
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
     setup_logging("INFO")
@@ -165,8 +154,7 @@ def main():
         api,
         accelerator="gpu",
         devices=1,
-        workers_per_device=args.workers,
-        timeout=120,
+        timeout=300,
     )
     server.run(port=args.port)
 
