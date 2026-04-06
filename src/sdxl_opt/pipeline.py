@@ -1,5 +1,6 @@
 """Load SDXL pipeline with configurable compression methods applied."""
 
+import gc
 import logging
 from dataclasses import dataclass
 
@@ -77,15 +78,34 @@ class CompressionConfig:
 
 
 def load_pipeline(config: CompressionConfig):
-    """Load SDXL pipeline and apply all compression methods from config."""
+    """
+    Load SDXL pipeline and apply all compression methods from config.
+
+    For quantization, we use a swap approach:
+      1. Load the full pipeline normally (fp16)
+      2. Delete the UNet from the pipeline
+      3. Reload the UNet separately with bitsandbytes quantization
+      4. Assign the quantized UNet back to the pipeline
+
+    This avoids PipelineQuantizationConfig compatibility issues
+    across different diffusers versions (tested with 0.37+).
+    """
     logger.info(f"Loading pipeline: {config.name} [{config.short_label()}]")
 
+    # --- Step 1: Load base pipeline (always without quantization) ---
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=config.torch_dtype,
+        variant="fp16" if config.dtype == "fp16" else None,
+    ).to("cuda")
+
+    # --- Step 2: Swap in quantized UNet if requested ---
     if config.quantize_unet:
-        # -----------------------------------------------------------
-        # Load UNet SEPARATELY with quantization, then pass to pipeline.
-        # This is the reliable approach — avoids PipelineQuantizationConfig
-        # issues across diffusers versions.
-        # -----------------------------------------------------------
+        # Free the fp16 UNet first to make room
+        del pipe.unet
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if config.quantize_unet == "int8":
             bnb_config = BitsAndBytesConfig(load_in_8bit=True)
         elif config.quantize_unet == "nf4":
@@ -98,53 +118,35 @@ def load_pipeline(config: CompressionConfig):
         else:
             raise ValueError(f"Unknown quantization: {config.quantize_unet}")
 
-        logger.info(f"Loading UNet with {config.quantize_unet} quantization")
-        unet = UNet2DConditionModel.from_pretrained(
+        logger.info(f"Swapping UNet for {config.quantize_unet}-quantized version")
+        pipe.unet = UNet2DConditionModel.from_pretrained(
             MODEL_ID,
             subfolder="unet",
             quantization_config=bnb_config,
             torch_dtype=config.torch_dtype,
         )
 
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            MODEL_ID,
-            unet=unet,
-            torch_dtype=config.torch_dtype,
-            variant="fp16" if config.dtype == "fp16" else None,
-        )
-        # Move non-quantized components to CUDA
-        # (quantized UNet is already on CUDA via bitsandbytes)
-        pipe.text_encoder = pipe.text_encoder.to("cuda")
-        pipe.text_encoder_2 = pipe.text_encoder_2.to("cuda")
-        pipe.vae = pipe.vae.to("cuda")
-
-    else:
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            MODEL_ID,
-            torch_dtype=config.torch_dtype,
-            variant="fp16" if config.dtype == "fp16" else None,
-        ).to("cuda")
-
-    # --- LCM-LoRA ---
+    # --- Step 3: LCM-LoRA (step reduction) ---
     if config.use_lcm_lora:
         logger.info("Applying LCM-LoRA for step reduction")
         pipe.load_lora_weights(LCM_LORA_ID)
         pipe.fuse_lora()
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
 
-    # --- Tiny VAE ---
+    # --- Step 4: Tiny VAE ---
     if config.use_tiny_vae:
         logger.info("Swapping VAE decoder for TinyVAE (taesdxl)")
-        pipe.vae = AutoencoderTiny.from_pretrained(TINY_VAE_ID, torch_dtype=config.torch_dtype)
-        pipe.vae = pipe.vae.to("cuda")
+        pipe.vae = AutoencoderTiny.from_pretrained(
+            TINY_VAE_ID, torch_dtype=config.torch_dtype
+        ).to("cuda")
 
-    # --- Pipeline-level optimizations ---
+    # --- Step 5: Pipeline-level optimizations ---
     if config.enable_vae_slicing:
         pipe.enable_vae_slicing()
     if config.enable_model_cpu_offload:
         pipe.enable_model_cpu_offload()
 
-    # --- torch.compile ---
+    # --- Step 6: torch.compile ---
     if config.use_torch_compile:
         logger.info(f"Compiling UNet with mode={config.compile_mode}")
         pipe.unet = torch.compile(pipe.unet, mode=config.compile_mode)
@@ -169,7 +171,9 @@ def generate_images(
         from DeepCache import DeepCacheSDHelper
 
         deepcache_helper = DeepCacheSDHelper(pipe=pipe)
-        deepcache_helper.set_params(cache_interval=config.deepcache_interval, cache_branch_id=0)
+        deepcache_helper.set_params(
+            cache_interval=config.deepcache_interval, cache_branch_id=0
+        )
         deepcache_helper.enable()
         logger.info(f"DeepCache enabled (interval={config.deepcache_interval})")
 
