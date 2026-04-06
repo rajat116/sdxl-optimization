@@ -1,0 +1,158 @@
+# SDXL Compression Experiment Configurations
+# Each entry defines a compression stack to benchmark.
+
+# ==============================================================================
+# Evaluation settings
+# ==============================================================================
+eval:
+  prompts:
+    - "a photo of an astronaut riding a horse on mars, high quality, detailed"
+    - "a beautiful sunset over a calm ocean with sailboats, oil painting style"
+    - "a corgi wearing a top hat and monocle, portrait photography"
+    - "a futuristic cityscape at night with neon lights reflecting on wet streets"
+  n_runs: 3
+  n_warmup: 2
+  height: 1024
+  width: 1024
+  seed: 42
+
+# ==============================================================================
+# Compression configurations
+# ==============================================================================
+# NOTE: configs are ordered from baseline → single methods → combinations
+# so we can measure each axis independently before stacking.
+
+configs:
+
+  # --- Baseline ---
+  - name: "baseline"
+    dtype: "fp16"
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  # --- Axis 1: Quantization ---
+  - name: "int8_unet"
+    dtype: "fp16"
+    quantize_unet: "int8"
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  - name: "nf4_unet"
+    dtype: "fp16"
+    quantize_unet: "nf4"
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  # --- Axis 2: Caching ---
+  - name: "deepcache_2"
+    dtype: "fp16"
+    use_deepcache: true
+    deepcache_interval: 2
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  - name: "deepcache_3"
+    dtype: "fp16"
+    use_deepcache: true
+    deepcache_interval: 3
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  # --- Axis 3: Step Reduction ---
+  - name: "lcm_8step"
+    dtype: "fp16"
+    use_lcm_lora: true
+    num_inference_steps: 8
+    guidance_scale: 1.5  # LCM works best with low guidance
+
+  - name: "lcm_4step"
+    dtype: "fp16"
+    use_lcm_lora: true
+    num_inference_steps: 4
+    guidance_scale: 1.5
+
+  # --- Axis 4: Compilation ---
+  - name: "compiled"
+    dtype: "fp16"
+    use_torch_compile: true
+    compile_mode: "reduce-overhead"
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  # --- Axis 5: Tiny VAE ---
+  - name: "tiny_vae"
+    dtype: "fp16"
+    use_tiny_vae: true
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  # ==============================================================================
+  # Combinations — stacking orthogonal methods
+  # ==============================================================================
+
+  - name: "nf4+deepcache"
+    dtype: "fp16"
+    quantize_unet: "nf4"
+    use_deepcache: true
+    deepcache_interval: 2
+    num_inference_steps: 50
+    guidance_scale: 7.5
+
+  - name: "lcm+deepcache"
+    dtype: "fp16"
+    use_lcm_lora: true
+    use_deepcache: true
+    deepcache_interval: 2
+    num_inference_steps: 8
+    guidance_scale: 1.5
+
+  - name: "lcm+compiled+tvae"
+    dtype: "fp16"
+    use_lcm_lora: true
+    use_torch_compile: true
+    compile_mode: "reduce-overhead"
+    use_tiny_vae: true
+    num_inference_steps: 8
+    guidance_scale: 1.5
+
+  - name: "full_stack"
+    dtype: "fp16"
+    quantize_unet: "nf4"
+    use_lcm_lora: true
+    use_deepcache: true
+    deepcache_interval: 2
+    use_torch_compile: true
+    compile_mode: "reduce-overhead"
+    use_tiny_vae: true
+    num_inference_steps: 8
+    guidance_scale: 1.5
+
+  # --- Deployment-oriented presets ---
+  - name: "preset_speed"
+    description: "Maximum speed, acceptable quality"
+    dtype: "fp16"
+    use_lcm_lora: true
+    use_torch_compile: true
+    use_tiny_vae: true
+    use_deepcache: true
+    deepcache_interval: 3
+    num_inference_steps: 4
+    guidance_scale: 1.5
+
+  - name: "preset_balanced"
+    description: "Good trade-off for production"
+    dtype: "fp16"
+    use_lcm_lora: true
+    use_deepcache: true
+    deepcache_interval: 2
+    num_inference_steps: 8
+    guidance_scale: 1.5
+
+  - name: "preset_quality"
+    description: "Minimal quality loss, still faster"
+    dtype: "fp16"
+    use_deepcache: true
+    deepcache_interval: 2
+    use_torch_compile: true
+    num_inference_steps: 50
+    guidance_scale: 7.5
