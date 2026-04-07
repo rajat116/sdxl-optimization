@@ -32,6 +32,22 @@ A systematic compression and optimization study of [Stable Diffusion XL](https:/
 - **torch.compile** has huge warmup variance, not practical for low-batch inference
 - **Best trade-off:** LCM + torch.compile + TinyVAE — 5.5× faster, 25% less VRAM, same quality
 
+### Combination Coverage
+
+We tested each optimization axis independently, then explored stacked combinations. Not all combinations are compatible — this table shows what was tested and why some were skipped.
+
+| Combination | Quant | Cache | Compile | LCM | TinyVAE | Tested | Result |
+|---|---|---|---|---|---|---|---|
+| NF4 + DeepCache | ✅ | ✅ | | | | ✅ | ⚠️ 0.67× — quantization overhead negated caching gains |
+| LCM + DeepCache | | ✅ | | ✅ | | ✅ | ❌ CLIP 0.208 — quality collapsed |
+| LCM + Compile + TinyVAE | | | ✅ | ✅ | ✅ | ✅ | ✅ **Best balanced: 5.5×, 9.7 GB** |
+| Full stack (no compile) | ✅ | ✅ | | ✅ | ✅ | ✅ | ❌ CLIP 0.128 — garbage output |
+| Compile + DeepCache | | ✅ | ✅ | | | ❌ | Skipped: CUDA graph conflict (torch.compile uses CUDA graphs which overwrite DeepCache's cached tensors) |
+| NF4 + LCM | ✅ | | | ✅ | | ❌ | Not tested — quantization already showed negative speedup as a single axis |
+| NF4 + LCM + Compile + TinyVAE | ✅ | | ✅ | ✅ | ✅ | ❌ | Not tested — same reason |
+
+**Why no pruning?** Structured pruning of SDXL's UNet is not supported out-of-the-box in diffusers. It requires custom implementation: identifying which attention heads or conv channels to prune, applying masks, and fine-tuning to recover quality. This is a multi-day research effort, not suitable for a benchmark study — but a promising direction for future work (and exactly the kind of thing Pruna could automate).
+
 ### Deployment Presets
 
 | Preset | Config | Latency | Speedup | VRAM | Use Case |
