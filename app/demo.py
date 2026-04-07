@@ -23,7 +23,7 @@ import torch
 from sdxl_opt.pipeline import CompressionConfig, load_pipeline, generate_images
 from sdxl_opt.utils import seed_everything, gpu_peak_memory_gb, reset_peak_memory
 
-# ── Presets with benchmark data from our experiments ──────────────────
+# ── Presets with benchmark data from our experiments (A100) ───────────
 PRESETS = {
     "⚡ Speed (4 steps — 6.7× faster)": {
         "config": CompressionConfig(
@@ -80,7 +80,7 @@ def get_pipe(preset_name):
 
 def generate(prompt, preset_name, seed):
     """Generate an image with the selected preset."""
-    if not prompt.strip():
+    if not prompt or not prompt.strip():
         return None, "Please enter a prompt."
 
     pipe, config = get_pipe(preset_name)
@@ -119,7 +119,7 @@ def generate(prompt, preset_name, seed):
 
 def compare(prompt, seed):
     """Generate with Speed and Quality presets side by side."""
-    if not prompt.strip():
+    if not prompt or not prompt.strip():
         return None, None, "Please enter a prompt."
 
     results = []
@@ -200,17 +200,17 @@ with gr.Blocks(
 
     with gr.Tab("📊 Benchmark Results"):
         gr.Markdown(
-            "## Benchmark Results (Tesla T4, fp16)\n\n"
+            "## Benchmark Results (NVIDIA A100, fp16)\n\n"
             "| Configuration | Latency | Speedup | VRAM | CLIP Score | Status |\n"
             "|---|---|---|---|---|---|\n"
             "| Baseline (50 steps) | 5.66s | 1.0× | 13.0 GB | 0.322 | Reference |\n"
-            "| INT8 UNet | 32.96s | 0.17× | 10.8 GB | 0.324 | ❌ Slower on T4 |\n"
-            "| NF4 UNet | 15.82s | 0.36× | 9.6 GB | 0.324 | ❌ Slower on T4 |\n"
+            "| INT8 UNet | 32.96s | 0.17× | 10.8 GB | 0.324 | ❌ Slower (bnb dequant overhead) |\n"
+            "| NF4 UNet | 15.82s | 0.36× | 9.6 GB | 0.324 | ❌ Slower (bnb dequant overhead) |\n"
             "| DeepCache (N=2) | 3.36s | 1.7× | 13.4 GB | 0.326 | ✅ |\n"
             "| DeepCache (N=3) | 2.45s | 2.3× | 13.4 GB | 0.324 | ✅ |\n"
             "| **LCM 8-step** | **1.38s** | **4.1×** | 13.4 GB | 0.320 | ✅ |\n"
             "| **LCM 4-step** | **0.85s** | **6.7×** | 13.4 GB | **0.327** | ✅ Best speed |\n"
-            "| torch.compile | 36.0s | 0.16× | 13.0 GB | 0.322 | ⚠️ High variance |\n"
+            "| torch.compile | 36.0s | 0.16× | 13.0 GB | 0.322 | ⚠️ High warmup variance |\n"
             "| Tiny VAE | 5.56s | 1.0× | 9.3 GB | 0.328 | ✅ Memory only |\n"
             "| NF4 + DeepCache | 8.43s | 0.67× | 10.0 GB | 0.325 | ⚠️ |\n"
             "| LCM + DeepCache | 0.89s | 6.4× | 13.8 GB | 0.208 | ❌ Quality loss |\n"
@@ -218,10 +218,10 @@ with gr.Blocks(
             "| Full stack (no compile) | 1.50s | 3.8× | 10.6 GB | 0.128 | ❌ Garbage |\n"
             "\n### Key Insights\n"
             "- **LCM-LoRA** is the highest-leverage single optimization (50→4 steps)\n"
-            "- **Quantization was slower on T4** — no INT4 tensor cores (would help on A100)\n"
+            "- **Quantization was slower** — bitsandbytes dequantization overhead dominates at low batch size\n"
             "- **Not all axes compose** — LCM+DeepCache and full_stack both degraded quality\n"
-            "- **torch.compile** has huge warmup variance on T4, not practical for low-batch\n"
+            "- **torch.compile** has huge warmup variance, not practical for low-batch inference\n"
             "- **Best trade-off:** LCM + torch.compile + TinyVAE — 5.5× faster, 25% less VRAM, same quality"
         )
 
-demo.launch(share=True, server_name="0.0.0.0", server_port=7860)
+demo.launch(share=True, debug=True, server_name="0.0.0.0", server_port=7860)
