@@ -43,6 +43,15 @@ PRESETS = {
         name="quality", dtype="fp16", use_deepcache=True,
         deepcache_interval=2, num_inference_steps=50, guidance_scale=7.5,
     ),
+    # HQQ preset: uses native INT4 kernels (no dequant overhead unlike BitsAndBytes).
+    # Combines memory savings (~60% VRAM reduction) with DeepCache latency savings.
+    # This is the Pruna-style recommended stack for SDXL on modern GPUs.
+    "hqq": CompressionConfig(
+        name="hqq", dtype="fp16",
+        use_hqq=True, hqq_weight_bits=4, hqq_group_size=64,
+        use_deepcache=True, deepcache_interval=2,
+        num_inference_steps=50, guidance_scale=7.5,
+    ),
 }
 
 

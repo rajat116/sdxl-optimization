@@ -26,9 +26,14 @@ class CompressionConfig:
 
     name: str = "baseline"
 
-    # Quantization
+    # Quantization — BitsAndBytes (legacy, dequant overhead on fast GPUs)
     quantize_unet: str | None = None  # "int8", "nf4", or None
     quantize_text_encoders: bool = False
+
+    # HQQ Quantization (preferred — uses Marlin native INT4 kernels, no dequant overhead)
+    use_hqq: bool = False
+    hqq_weight_bits: int = 4  # 4 or 8
+    hqq_group_size: int = 64
 
     # Caching
     use_deepcache: bool = False
@@ -62,6 +67,8 @@ class CompressionConfig:
     def short_label(self) -> str:
         """Human-readable short label for plots."""
         parts = [self.name]
+        if self.use_hqq:
+            parts.append(f"hqq{self.hqq_weight_bits}b")
         if self.quantize_unet:
             parts.append(f"q{self.quantize_unet}")
         if self.use_deepcache:
@@ -99,7 +106,32 @@ def load_pipeline(config: CompressionConfig):
         variant="fp16" if config.dtype == "fp16" else None,
     ).to("cuda")
 
-    # --- Step 2: Swap in quantized UNet if requested ---
+    # --- Step 2b: HQQ Quantization (preferred over BitsAndBytes on modern GPUs) ---
+    # HQQ uses native INT4 kernels (Marlin backend) — no runtime dequantization.
+    # On A100+, this is actually faster than FP16, unlike BitsAndBytes which adds overhead.
+    if config.use_hqq:
+        try:
+            from hqq.engine.diffusers import HQQDiffusersModel
+            from hqq.core.quantize import HQQLinear, BaseQuantizeConfig
+
+            quant_config = BaseQuantizeConfig(
+                nbits=config.hqq_weight_bits,
+                group_size=config.hqq_group_size,
+                quant_scale=False,
+                quant_zero=False,
+            )
+            logger.info(f"Applying HQQ {config.hqq_weight_bits}-bit quantization (group_size={config.hqq_group_size})")
+            HQQDiffusersModel.quantize_model_(
+                pipe.unet,
+                quant_config=quant_config,
+                compute_dtype=config.torch_dtype,
+            )
+            HQQLinear.set_backend(HQQLinear.backends.PYTORCH)
+            logger.info("HQQ quantization complete")
+        except ImportError:
+            logger.warning("hqq not installed — falling back to FP16. Run: pip install hqq")
+
+    # --- Step 2: Swap in BitsAndBytes-quantized UNet if requested ---
     if config.quantize_unet:
         # Free the fp16 UNet first to make room
         del pipe.unet

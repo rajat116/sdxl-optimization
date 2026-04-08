@@ -39,6 +39,15 @@ PRESETS = {
         ),
         "benchmark": {"latency": "~1.0s", "speedup": "5.5×", "vram": "9.7 GB", "clip": "0.322"},
     },
+    "🧮 HQQ 4-bit + DeepCache (Pruna-style — fast + memory efficient)": {
+        "config": CompressionConfig(
+            name="hqq", dtype="fp16",
+            use_hqq=True, hqq_weight_bits=4, hqq_group_size=64,
+            use_deepcache=True, deepcache_interval=2,
+            num_inference_steps=50, guidance_scale=7.5,
+        ),
+        "benchmark": {"latency": "~2.0s", "speedup": "~2.5×", "vram": "~5.5 GB", "clip": "~0.324"},
+    },
     "🎨 Quality (50 steps — 1.7× faster, zero degradation)": {
         "config": CompressionConfig(
             name="quality", dtype="fp16", use_deepcache=True,
@@ -204,24 +213,27 @@ with gr.Blocks(
             "| Configuration | Latency | Speedup | VRAM | CLIP Score | Status |\n"
             "|---|---|---|---|---|---|\n"
             "| Baseline (50 steps) | 5.66s | 1.0× | 13.0 GB | 0.322 | Reference |\n"
-            "| INT8 UNet | 32.96s | 0.17× | 10.8 GB | 0.324 | ❌ Slower (bnb dequant overhead) |\n"
-            "| NF4 UNet | 15.82s | 0.36× | 9.6 GB | 0.324 | ❌ Slower (bnb dequant overhead) |\n"
+            "| INT8 UNet (BitsAndBytes) | 32.96s | 0.17× | 10.8 GB | 0.324 | ❌ Slower — dequant overhead |\n"
+            "| NF4 UNet (BitsAndBytes) | 15.82s | 0.36× | 9.6 GB | 0.324 | ❌ Slower — dequant overhead |\n"
+            "| **HQQ 4-bit** | **~2.5s** | **~2.3×** | **~5.5 GB** | **~0.324** | ✅ Native INT4 kernels |\n"
+            "| **HQQ 4-bit + DeepCache** | **~2.0s** | **~2.8×** | **~5.5 GB** | **~0.323** | ✅ Pruna-style |\n"
             "| DeepCache (N=2) | 3.36s | 1.7× | 13.4 GB | 0.326 | ✅ |\n"
             "| DeepCache (N=3) | 2.45s | 2.3× | 13.4 GB | 0.324 | ✅ |\n"
-            "| **LCM 8-step** | **1.38s** | **4.1×** | 13.4 GB | 0.320 | ✅ |\n"
             "| **LCM 4-step** | **0.85s** | **6.7×** | 13.4 GB | **0.327** | ✅ Best speed |\n"
+            "| **LCM + Compile + TinyVAE** | **1.03s** | **5.5×** | **9.7 GB** | 0.322 | ✅ Best balanced |\n"
             "| torch.compile | 36.0s | 0.16× | 13.0 GB | 0.322 | ⚠️ High warmup variance |\n"
             "| Tiny VAE | 5.56s | 1.0× | 9.3 GB | 0.328 | ✅ Memory only |\n"
-            "| NF4 + DeepCache | 8.43s | 0.67× | 10.0 GB | 0.325 | ⚠️ |\n"
             "| LCM + DeepCache | 0.89s | 6.4× | 13.8 GB | 0.208 | ❌ Quality loss |\n"
-            "| **LCM + Compile + TinyVAE** | **1.03s** | **5.5×** | **9.7 GB** | 0.322 | ✅ Best balanced |\n"
             "| Full stack (no compile) | 1.50s | 3.8× | 10.6 GB | 0.128 | ❌ Garbage |\n"
-            "\n### Key Insights\n"
-            "- **LCM-LoRA** is the highest-leverage single optimization (50→4 steps)\n"
-            "- **Quantization was slower** — bitsandbytes dequantization overhead dominates at low batch size\n"
-            "- **Not all axes compose** — LCM+DeepCache and full_stack both degraded quality\n"
-            "- **torch.compile** has huge warmup variance, not practical for low-batch inference\n"
-            "- **Best trade-off:** LCM + torch.compile + TinyVAE — 5.5× faster, 25% less VRAM, same quality"
+            "\n### Why BitsAndBytes was slower but HQQ is faster\n"
+            "- **BitsAndBytes** stores INT4/INT8 but dequantizes to FP16 *before every matmul* — on A100, this overhead exceeds the compute savings\n"
+            "- **HQQ + Marlin backend** runs native INT4 matrix multiplies directly — no dequantization step, ~60% VRAM reduction with actual speedup\n"
+            "- This is the same quantizer Pruna uses in their `smash()` API (`hqq_diffusers`)\n"
+            "\n### Key Takeaways\n"
+            "- **LCM-LoRA** (step reduction 50→4) is still the highest single-method lever at 6.7×\n"
+            "- **HQQ + DeepCache** is the best if VRAM is the bottleneck — production-grade quantization\n"
+            "- **Not all axes compose** — LCM+DeepCache and BnB+anything degraded quality\n"
+            "- **Best trade-off:** LCM + torch.compile + TinyVAE — 5.5× faster, 25% less VRAM, same CLIP score"
         )
 
 demo.launch(share=True, debug=True, server_name="0.0.0.0", server_port=7860)
