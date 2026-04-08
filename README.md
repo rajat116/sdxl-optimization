@@ -10,27 +10,34 @@ A systematic compression and optimization study of [Stable Diffusion XL](https:/
 
 | Configuration | Latency (s) | Speedup | Peak VRAM (GB) | CLIP Score | Status |
 |---|---|---|---|---|---|
-| Baseline (50 steps) | 5.66 | 1.0× | 13.0 | 0.322 | Reference |
-| INT8 UNet | 32.96 | 0.17× | 10.8 | 0.324 | ❌ Slower (bnb overhead) |
-| NF4 UNet | 15.82 | 0.36× | 9.6 | 0.324 | ❌ Slower (bnb overhead) |
-| DeepCache (N=2) | 3.36 | 1.7× | 13.4 | 0.326 | ✅ |
-| DeepCache (N=3) | 2.45 | 2.3× | 13.4 | 0.324 | ✅ |
-| **LCM 8-step** | **1.38** | **4.1×** | 13.4 | 0.320 | ✅ |
-| **LCM 4-step** | **0.85** | **6.7×** | 13.4 | **0.327** | ✅ Best speed |
-| torch.compile | 36.0 | 0.16× | 13.0 | 0.322 | ⚠️ High warmup variance |
+| Baseline (50 steps) | 5.72 | 1.0× | 13.0 | 0.322 | Reference |
+| INT8 UNet (BitsAndBytes) | 33.06 | 0.17× | 10.8 | 0.324 | ❌ Slower — dequant overhead |
+| NF4 UNet (BitsAndBytes) | 15.95 | 0.36× | 9.6 | 0.324 | ❌ Slower — dequant overhead |
+| **HQQ 4-bit** | **5.65** | **1.0×** | **11.3** | **0.317** | ✅ Same speed, 13% less VRAM |
+| **HQQ 4-bit + DeepCache** | **3.31** | **1.7×** | **11.6** | **0.318** | ✅ |
+| HQQ 4-bit + compile | 36.7 | 0.16× | 11.3 | 0.317 | ⚠️ High warmup variance |
+| **HQQ + DeepCache (pruna)** | **5.07** | **1.1×** | **9.5** | **0.323** | ✅ 27% less VRAM |
+| DeepCache (N=2) | 3.40 | 1.7× | 13.4 | 0.326 | ✅ |
+| DeepCache (N=3) | 2.48 | 2.3× | 13.4 | 0.324 | ✅ |
+| **LCM 8-step** | **1.36** | **4.2×** | 13.4 | 0.320 | ✅ |
+| **LCM 4-step** | **0.876** | **6.5×** | 13.4 | **0.327** | ✅ Best speed |
+| torch.compile | 35.9 | 0.16× | 13.0 | 0.322 | ⚠️ High warmup variance |
 | Tiny VAE | 5.56 | 1.0× | 9.3 | 0.328 | ✅ Memory only |
-| NF4 + DeepCache | 8.43 | 0.67× | 10.0 | 0.325 | ⚠️ |
-| LCM + DeepCache | 0.89 | 6.4× | 13.8 | 0.208 | ❌ Quality loss |
-| **LCM + Compile + TinyVAE** | **1.03** | **5.5×** | **9.7** | 0.322 | ✅ Best balanced |
-| Full stack (no compile) | 1.50 | 3.8× | 10.6 | 0.128 | ❌ Garbage |
+| NF4 + DeepCache | 8.53 | 0.67× | 10.0 | 0.325 | ⚠️ Overhead negates caching |
+| LCM + DeepCache | 0.891 | 6.4× | 13.8 | 0.208 | ❌ Quality collapse |
+| **LCM + Compile + TinyVAE** | **1.26** | **4.5×** | **9.7** | 0.322 | ✅ Best balanced |
+| Full stack (no compile) | 1.51 | 3.8× | 6.7 | 0.128 | ❌ Garbage output |
 
 ### Key Insights
 
-- **LCM-LoRA** is the highest-leverage single optimization: 50 → 4 steps, 6.7× speedup, no quality loss
-- **Quantization was slower** — bitsandbytes dequantization overhead dominates at low batch size
+- **LCM-LoRA** is the highest-leverage single optimization: 50 → 4 steps, **6.5× speedup**, no quality loss
+- **BitsAndBytes quantization was slower** — dequantization overhead at every matmul dominates on A100
+- **HQQ 4-bit** matches baseline speed but uses **13% less VRAM** — on smaller GPUs where VRAM is the constraint, this is the right choice. Combined with DeepCache it reaches **1.7× speedup + 11% VRAM reduction**
+- **HQQ + DeepCache via pruna library** achieves **1.1× speedup + 27% VRAM reduction**
 - **Not all axes compose cleanly** — LCM + DeepCache and full stack both degraded quality significantly
-- **torch.compile** has huge warmup variance, not practical for low-batch inference
-- **Best trade-off:** LCM + torch.compile + TinyVAE — 5.5× faster, 25% less VRAM, same quality
+- **torch.compile** has huge warmup variance (std=43s!), not practical for low-batch inference
+- **Best speed:** LCM 4-step — 6.5× faster, same quality
+- **Best balanced:** LCM + compile + TinyVAE — 4.5× faster, 25% less VRAM, same CLIP score
 
 ### Combination Coverage
 
@@ -52,9 +59,10 @@ We tested each optimization axis independently, then explored stacked combinatio
 
 | Preset | Config | Latency | Speedup | VRAM | Use Case |
 |---|---|---|---|---|---|
-| 🚀 **Speed** | LCM 4-step | 0.85s | 6.7× | 13.4 GB | Real-time / interactive |
-| ⚖️ **Balanced** | LCM 8-step + TinyVAE | 1.03s | 5.5× | 9.7 GB | Production APIs |
-| 🎨 **Quality** | DeepCache (N=2) | 3.36s | 1.7× | 13.4 GB | Quality-critical |
+| 🚀 **Speed** | LCM 4-step | 0.876s | 6.5× | 13.4 GB | Real-time / interactive |
+| ⚖️ **Balanced** | LCM + compile + TinyVAE | 1.26s | 4.5× | 9.7 GB | Production APIs |
+| 🎨 **Quality** | DeepCache (N=2) | 3.40s | 1.7× | 13.4 GB | Quality-critical |
+| 🧮 **Memory** | HQQ 4-bit + DeepCache | 5.07s | 1.1× | 9.5 GB | VRAM-constrained deployment |
 
 ---
 
@@ -209,19 +217,22 @@ Most optimization studies apply one method and report a number. This study takes
 |---|---|---|---|
 | INT8 quantization | UNet weights | Post-training 8-bit via BitsAndBytes | Memory ↓, Speed ↓ (dequant overhead) |
 | NF4 quantization | UNet weights | 4-bit NormalFloat via BitsAndBytes | Memory ↓↓, Speed ↓ (dequant overhead) |
+| **HQQ 4-bit** | UNet weights | Native INT4 kernels, no dequant | **Memory ↓ (13%), Speed neutral on A100** |
 | DeepCache | UNet inference | Cache & reuse high-level features across steps | 1.7–2.3× speedup |
-| LCM-LoRA | Scheduler + UNet | Distilled consistency model, fewer steps | **6.7× speedup** (best single method) |
-| torch.compile | UNet | Graph capture & kernel fusion | High warmup cost, impractical for low-batch |
+| LCM-LoRA | Scheduler + UNet | Distilled consistency model, fewer steps | **6.5× speedup** (best single method) |
+| torch.compile | UNet | Graph capture & kernel fusion | High warmup variance, impractical for low-batch |
 | Tiny VAE | VAE decoder | Smaller decoder architecture | Memory ↓, no speed gain |
-| Stacking | Multiple | Combine orthogonal methods | Best: LCM + compile + TinyVAE = 5.5× |
+| HQQ + DeepCache | UNet weights + inference | Native INT4 + skip redundant blocks | 1.7× speedup + 11% VRAM ↓ |
+| HQQ + DeepCache (pruna) | UNet | hqq_diffusers + deepcache | 1.1× speedup + 27% VRAM ↓ |
+| Stacking | Multiple | Combine orthogonal methods | Best: LCM + compile + TinyVAE = 4.5× |
 
 ## Future Work
 
-- **Test on different hardware** — quantization speedup expected on GPUs with INT4/INT8 tensor cores
+- **Hardware sweep** — HQQ gives real speedup on smaller GPUs where VRAM is the bottleneck; A100's FP16 tensor cores are already near-optimal
 - **Ternary quantization** — BitNet-style 1.58-bit weights for the UNet
 - **Per-block mixed precision** — different UNet blocks have different sensitivity; quantize aggressively where quality impact is low
 - **Speculative decoding for diffusion** — use a small model for early denoising steps, full model for final steps
-- **Pruna integration** — wrap all methods into `smash()` calls for one-line optimization
+- **HQQ on matched dependency versions** — version pinning in Colab limited performance; expect better results with aligned diffusers + transformers versions
 
 ---
 
